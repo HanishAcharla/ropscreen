@@ -20,10 +20,10 @@ Cloud Run's Always Free tier covers this comfortably at low traffic (2M requests
    gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
    ```
 
-3. From the repo root, deploy directly from source — `gcloud` builds the `Dockerfile` via Cloud Build and deploys it, no manual `docker push` needed:
+3. Deploy directly from source from inside `server/` — `gcloud` builds the `Dockerfile` via Cloud Build and deploys it, no manual `docker push` needed. Note the `^;^` prefix on `--set-env-vars`: gcloud normally splits that flag's value on commas, which collides with the comma *inside* `ALLOWED_ORIGINS` (two allowed origins, comma-separated) — `^;^` tells it to split on `;` instead, so the comma inside the value is left alone:
 
    ```bash
-   cd server
+   cd /path/to/RetinalDisease/server
    gcloud run deploy ropscreen-api \
      --source . \
      --region us-central1 \
@@ -33,7 +33,7 @@ Cloud Run's Always Free tier covers this comfortably at low traffic (2M requests
      --timeout 300 \
      --min-instances 0 \
      --max-instances 1 \
-     --set-env-vars ALLOWED_ORIGINS=https://web-delta-seven-48.vercel.app,http://localhost:3000
+     --set-env-vars="^;^ALLOWED_ORIGINS=https://web-delta-seven-48.vercel.app,http://localhost:3000"
    ```
 
    First build takes a few minutes (installing PyTorch + TensorFlow into the image). `gcloud` prints the service URL when done, e.g. `https://ropscreen-api-xxxxx-uc.a.run.app`.
