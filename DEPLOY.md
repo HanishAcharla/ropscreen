@@ -2,86 +2,75 @@
 
 The app has two parts that deploy separately:
 
-- **`web/`** — the Next.js site (research showcase + demo UI). Deploys to **Vercel**.
-- **`server/`** — the FastAPI inference API (ResNet-50 + SWIN-B ensemble). Deploys to a **Hugging Face Space** (Docker SDK), since the model weights (~450MB total) and PyTorch/TensorFlow runtime are too large/heavy for Vercel serverless functions.
-
-Deploy the backend first — the frontend needs its URL.
+- **`web/`** — the Next.js site (research showcase + demo UI). **Already live** on Vercel: https://web-delta-seven-48.vercel.app
+- **`server/`** — the FastAPI inference API (ResNet-50 + SWIN-B ensemble). Deploys to **Google Cloud Run**, since the model weights (~450MB) and PyTorch/TensorFlow runtime are too large/heavy for Vercel serverless functions, and need more RAM than typical free web-hosting tiers offer.
 
 ---
 
-## 1. Deploy the backend to Hugging Face Spaces
+## 1. Deploy the backend to Google Cloud Run
 
-1. Create a free account at [huggingface.co](https://huggingface.co/join) if you don't have one.
-2. Create a new Space: [huggingface.co/new-space](https://huggingface.co/new-space)
-   - **Space name**: e.g. `ropscreen-api`
-   - **SDK**: **Docker**
-   - **Hardware**: Free CPU basic is fine (inference takes a few seconds per image)
-   - **Visibility**: Public (so the frontend can call it) or Private with a token — public is simpler to start
-3. On your machine, install the [huggingface_hub CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) and log in, or just use `git` directly with a Space access token:
+Cloud Run's Always Free tier covers this comfortably at low traffic (2M requests/month, generous CPU/memory-second quotas), but Google requires a billing account (card on file) to enable it even if you never leave the free tier. `--min-instances 0` below means the service scales to zero and costs nothing while idle, and `--max-instances 1` puts a hard ceiling on how much it could ever scale up, as a safety net against surprise charges.
+
+1. Create a Google Cloud project (or use an existing one) at [console.cloud.google.com](https://console.cloud.google.com), and link a billing account under **Billing** in the console (needed once, even for free-tier usage).
+2. Install the [gcloud CLI](https://cloud.google.com/sdk/docs/install) if you don't have it, then authenticate:
+
+   ```bash
+   gcloud auth login
+   gcloud config set project <your-project-id>
+   gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
+   ```
+
+3. From the repo root, deploy directly from source — `gcloud` builds the `Dockerfile` via Cloud Build and deploys it, no manual `docker push` needed:
 
    ```bash
    cd server
-   git remote add space https://huggingface.co/spaces/<your-username>/ropscreen-api
-   git push space main
+   gcloud run deploy ropscreen-api \
+     --source . \
+     --region us-central1 \
+     --allow-unauthenticated \
+     --memory 4Gi \
+     --cpu 2 \
+     --timeout 300 \
+     --min-instances 0 \
+     --max-instances 1 \
+     --set-env-vars ALLOWED_ORIGINS=https://web-delta-seven-48.vercel.app,http://localhost:3000
    ```
 
-   Git will prompt for a username/password — use your Hugging Face username and an [access token](https://huggingface.co/settings/tokens) (with **write** scope) as the password. The `models/*.h5` and `models/*.pt` files are tracked with Git LFS (already configured via `server/.gitattributes`), so they'll upload correctly as long as `git lfs` is installed locally (`brew install git-lfs`).
+   First build takes a few minutes (installing PyTorch + TensorFlow into the image). `gcloud` prints the service URL when done, e.g. `https://ropscreen-api-xxxxx-uc.a.run.app`.
 
-4. The Space will build the Dockerfile and start the API. First build takes a few minutes (installing PyTorch + TensorFlow). Watch progress in the Space's "Logs" tab.
-5. Once running, your API lives at `https://<your-username>-ropscreen-api.hf.space`. Test it:
+4. Test it:
 
    ```bash
-   curl https://<your-username>-ropscreen-api.hf.space/api/health
+   curl https://ropscreen-api-xxxxx-uc.a.run.app/api/health
    # {"status":"ok","models_loaded":true}
    ```
 
-6. **Set CORS**: in your Space settings, add a repository secret/variable `ALLOWED_ORIGINS` set to your Vercel domain(s), comma-separated, e.g.:
+> **Note on class order**: `server/app/config.py`'s `CLASS_LABELS` constant was verified locally against the three "try an example" images used on `/demo` — both models agree on the right label at >96% confidence. If you ever retrain and predictions look scrambled, that's the one place to check.
 
-   ```
-   https://ropscreen.vercel.app,http://localhost:3000
-   ```
-
-   Restart the Space after adding it.
-
-> **Note on class order**: `server/app/config.py` has a `CLASS_LABELS` constant with a best-guess ordering based on the training notebook. Once the Space is live, verify predictions look right using the three "try an example" images on `/demo` (they're real fundus photos with known labels — Physiological, ROP, Hemorrhage). If a prediction looks scrambled (e.g. an obviously healthy image classified as Hemorrhage with high confidence), fix the order in that one constant and redeploy.
-
-> **Cold starts**: free Spaces sleep after a period of inactivity and take ~20-30s to wake on the next request. The frontend already shows a "waking up" message during this wait.
+> **Cold starts**: with `--min-instances 0`, the container fully stops when idle and takes ~10-20s to cold-start on the next request (container boot + loading both models). The frontend already shows a "waking up" message during this wait. If cold starts bother you and you're comfortable with a small always-on cost, set `--min-instances 1` — but that means the free tier no longer fully covers it.
 
 ---
 
-## 2. Deploy the frontend to Vercel
+## 2. Point the frontend at the backend
 
-1. Push `web/` to GitHub (see below), or deploy directly with the Vercel CLI.
-2. Go to [vercel.com/new](https://vercel.com/new) and import the GitHub repo.
-   - **Root Directory**: `web`
-   - Framework preset: Next.js (auto-detected)
-3. Add an environment variable before deploying:
-   - `NEXT_PUBLIC_API_URL` = your Hugging Face Space URL from step 1 (e.g. `https://your-username-ropscreen-api.hf.space`)
-4. Deploy. Vercel gives you a URL like `ropscreen.vercel.app`.
-5. Go back to your Hugging Face Space settings and make sure `ALLOWED_ORIGINS` includes this exact Vercel URL, then restart the Space.
+In the [Vercel dashboard](https://vercel.com/hanishacharlas-projects/web/settings/environment-variables) (or via CLI), set:
 
-### Via CLI instead
+```
+NEXT_PUBLIC_API_URL=https://ropscreen-api-xxxxx-uc.a.run.app
+```
+
+then redeploy:
 
 ```bash
 cd web
-npx vercel          # first deploy, follow prompts, set root env var when asked
-npx vercel --prod    # promote to production
+npx vercel --prod
 ```
 
 ---
 
 ## 3. Push to GitHub
 
-From the repo root:
-
-```bash
-git init
-git add web server DEPLOY.md
-git commit -m "ROPscreen: research showcase + live ensemble demo"
-gh repo create ropscreen --public --source=. --push
-```
-
-(Model weight files live under `server/models/` and are pushed separately to the Hugging Face Space, not GitHub — GitHub isn't a great fit for 450MB of binary weights. `server/.gitignore`/`.gitattributes` are scoped for the Space's own repo.)
+Already done: https://github.com/HanishAcharla/ropscreen (the `web/` app; `server/` is a separate local git repo since its model weights don't belong in the same place as the frontend's history — push it to wherever you end up hosting its source, e.g. GitHub with Git LFS, if you want a backup beyond your Cloud Run deploy).
 
 ---
 
